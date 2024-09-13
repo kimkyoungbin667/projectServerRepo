@@ -234,14 +234,14 @@ app.post('/goLogin', (req, res) => {
 // 파일 업로드 설정
 const storage = multer.diskStorage({
     destination: (req, file, cb) => {
-        cb(null, 'uploads/'); // 업로드된 파일을 저장할 디렉토리
+        cb(null, '../projectRepository/chil/uploads/'); // 업로드된 파일을 저장할 디렉토리
     },
     filename: (req, file, cb) => {
         cb(null, Date.now() + path.extname(file.originalname)); // 파일명을 고유하게 설정
     }
 });
 
-const uploadDir = path.join(__dirname, 'uploads');
+const uploadDir = path.join(__dirname, '../projectRepository/chil/uploads/');
 if (!fs.existsSync(uploadDir)) {
     fs.mkdirSync(uploadDir);
 }
@@ -383,52 +383,78 @@ app.get('/reports', (req, res) => {
 
 app.get('/used-goods', (req, res) => {
     const searchQuery = req.query.search;
-    const categories = req.query.categories; // 추가된 카테고리 필터
+    const categories = req.query.categories;
+    const minPrice = req.query.minPrice;
+    const maxPrice = req.query.maxPrice;
+    const limit = parseInt(req.query.limit) || 12; // 한 페이지당 표시할 상품 수
+    const offset = parseInt(req.query.offset) || 0; // 시작 지점
+
     let sql = `
         SELECT u.userName, u.userLocation, g.goodsBoardId, g.goodsBoardTitle, g.goodsBoardContent, g.goodsPrice, g.goodsBoardWritingDate, g.isSoldOut, g.sellLocation, g.goodsCategoryId, g.viewCount, g.goodsPhotoUrl
         FROM usedgoodsboard g
         JOIN userinfo u ON g.userId = u.userId
     `;
 
+    let countSql = `SELECT COUNT(*) as totalCount FROM usedgoodsboard g JOIN userinfo u ON g.userId = u.userId`;
+
     const queryParams = [];
+    const countParams = [];
 
     if (searchQuery) {
         sql += ` WHERE (g.goodsBoardTitle LIKE ? OR g.sellLocation LIKE ?) `;
+        countSql += ` WHERE (g.goodsBoardTitle LIKE ? OR g.sellLocation LIKE ?) `;
         queryParams.push(`%${searchQuery}%`, `%${searchQuery}%`);
-
-        // 검색어 로그를 업데이트하는 SQL
-        const logSql = `
-            INSERT INTO search_log (searchQuery, searchCount, lastSearched)
-            VALUES (?, 1, NOW())
-            ON DUPLICATE KEY UPDATE searchCount = searchCount + 1, lastSearched = NOW()
-        `;
-
-        // 검색어 로그 업데이트
-        connection.query(logSql, [searchQuery], (logErr) => {
-            if (logErr) {
-                console.error('검색어 로그 업데이트 중 오류 발생:', logErr);
-            }
-        });
+        countParams.push(`%${searchQuery}%`, `%${searchQuery}%`);
     }
 
-    // 카테고리 필터가 있으면 추가
     if (categories) {
         const categoryList = categories.split(',').map(cat => `'${cat}'`).join(',');
         sql += searchQuery ? ` AND ` : ` WHERE `;
+        countSql += searchQuery ? ` AND ` : ` WHERE `;
         sql += ` g.goodsCategoryId IN (${categoryList}) `;
+        countSql += ` g.goodsCategoryId IN (${categoryList}) `;
     }
 
-    sql += ` ORDER BY g.viewCount DESC`;
+    if (minPrice) {
+        sql += searchQuery || categories ? ` AND ` : ` WHERE `;
+        countSql += searchQuery || categories ? ` AND ` : ` WHERE `;
+        sql += ` g.goodsPrice >= ? `;
+        countSql += ` g.goodsPrice >= ? `;
+        queryParams.push(minPrice);
+        countParams.push(minPrice);
+    }
+
+    if (maxPrice) {
+        sql += searchQuery || categories || minPrice ? ` AND ` : ` WHERE `;
+        countSql += searchQuery || categories || minPrice ? ` AND ` : ` WHERE `;
+        sql += ` g.goodsPrice <= ? `;
+        countSql += ` g.goodsPrice <= ? `;
+        queryParams.push(maxPrice);
+        countParams.push(maxPrice);
+    }
+
+    sql += ` ORDER BY g.viewCount DESC LIMIT ? OFFSET ?`;
+    queryParams.push(limit, offset);
 
     connection.query(sql, queryParams, (err, results) => {
         if (err) {
             console.error('상품 목록 조회 중 오류가 발생했습니다: ', err);
             res.status(500).send('상품 목록을 가져오는 중 오류가 발생했습니다.');
         } else {
-            res.status(200).json(results); // JSON 형식으로 응답
+            // 총 상품 수 계산
+            connection.query(countSql, countParams, (countErr, countResult) => {
+                if (countErr) {
+                    console.error('상품 개수 조회 중 오류가 발생했습니다: ', countErr);
+                    res.status(500).send('상품 개수를 가져오는 중 오류가 발생했습니다.');
+                } else {
+                    const totalCount = countResult[0].totalCount;
+                    res.status(200).json({ goods: results, totalCount }); // 상품과 총 상품 수를 함께 응답
+                }
+            });
         }
     });
 });
+
 
 
 function applyCategoryFilter() {
@@ -440,18 +466,13 @@ function applyCategoryFilter() {
     loadGoods('', selectedCategories);
 }
 
-
-
-
-
-
 app.get('/used-goods/random', (req, res) => {
     let sql = `
-        SELECT u.userName, u.userLocation, g.goodsBoardId, g.goodsBoardTitle, g.goodsBoardContent, g.goodsPrice, g.goodsBoardWritingDate, g.isSoldOut, g.sellLocation
+        SELECT u.userName, u.userLocation, g.goodsBoardId, g.goodsBoardTitle, g.goodsBoardContent, g.goodsPrice, g.goodsBoardWritingDate, g.isSoldOut, g.sellLocation, g.goodsPhotoUrl
         FROM usedgoodsboard g
         JOIN userinfo u ON g.userId = u.userId
         ORDER BY RAND() 
-        LIMIT 10
+        LIMIT 5
     `;
     connection.query(sql, (err, results) => {
         if (err) {
@@ -604,7 +625,7 @@ app.get('/liked-goods/:userId', (req, res) => {
 // 제품 추가 라우트
 app.post('/add-goods', upload.single('goodsPhoto'), (req, res) => {
     const { userId, goodsTitle, goodsContent, goodsPrice, goodsCategory, sellLocation, latitude, longitude, goodsBoardWritingDate } = req.body;
-    const goodsPhotoUrl = `/uploads/${req.file.filename}`; // 업로드된 파일 경로
+    const goodsPhotoUrl = `./uploads/${req.file.filename}`; // 업로드된 파일 경로
 
     // MySQL 쿼리로 데이터베이스에 삽입
     const query = `INSERT INTO usedgoodsboard 
@@ -638,7 +659,7 @@ app.get('/categories', (req, res) => {
 app.get('/used-goods/categories', (req, res) => {
     const searchQuery = req.query.search || '';
     const categories = req.query.categories || [];
-  
+
     // 검색어와 선택된 카테고리에 따른 상품을 조회하고, 해당 상품들의 카테고리만 반환
     const query = `
       SELECT DISTINCT c.categoryId, c.categoryName, COUNT(p.goodsBoardId) AS productCount
@@ -648,11 +669,11 @@ app.get('/used-goods/categories', (req, res) => {
       AND (p.goodsCategoryId IN (?) OR ? = '')
       GROUP BY c.categoryId;
     `;
-    
-    db.query(query, [`%${searchQuery}%`, searchQuery, categories, categories], (err, results) => {
-      if (err) {
-        return res.status(500).send('Error fetching categories');
-      }
-      res.json(results);
+
+    connection.query(query, [`%${searchQuery}%`, searchQuery, categories, categories], (err, results) => {
+        if (err) {
+            return res.status(500).send('Error fetching categories');
+        }
+        res.json(results);
     });
-  });
+});
