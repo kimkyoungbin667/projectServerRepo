@@ -40,7 +40,7 @@ app.listen(3000, function () {
     console.log('node start');
 });
 
-
+const crypto = require('crypto'); // 암호화 내장 모듈
 
 // ============ 이메일 인증 ============ //
 
@@ -61,6 +61,25 @@ const sendEmail = async (email, code) => {
         to: email,
         subject: '인증코드를 발신해드립니다!',
         text: `인증코드는 ${code}`,
+    });
+};
+
+
+// Nodemailer로 임시 비밀번호 전송 함수
+const sendTemporaryPassword = async (email, tempPassword) => {
+    let transporter = nodemailer.createTransport({
+        service: 'gmail',
+        auth: {
+            user: 'rudqlssla369@gmail.com',
+            pass: 'bpxhlhogcwlfephr' 
+        }
+    });
+
+    await transporter.sendMail({
+        from: '"칠리마켓" <rudqlssla369@gmail.com>',
+        to: email,
+        subject: '임시 비밀번호 안내',
+        text: `안녕하세요,\n\n임시 비밀번호는 다음과 같습니다: ${tempPassword}\n로그인 후 비밀번호를 변경해 주세요.\n\n감사합니다.`
     });
 };
 
@@ -151,7 +170,7 @@ app.post('/kakaoRegister', (req, res) => {
 
 //[Post] 아이디 중복체크
 app.post('/checkId', (req, res) => {
-    console.log('[Post] 중복체크 실행');
+    console.log('[Post] 아이디 중복체크 실행');
     let data = req.body; //post는 데이터를 body에 넣기때문에 
 
     let userId = data.userId;
@@ -169,7 +188,30 @@ app.post('/checkId', (req, res) => {
             res.json({ exists });
         }
     );
+});
 
+//[Post] 이메일 인증에서 이메일 중복체크
+app.post('/checkEmailDupli', (req, res) => {
+    console.log('[Post] 이메일 중복체크 실행');
+    let data = req.body; //post는 데이터를 body에 넣기때문에 
+
+    let userEmail = data.email;
+
+    console.log(userEmail);
+    connection.query(
+        'SELECT EXISTS (SELECT 1 FROM userInfo WHERE userEmail = ?) AS idExists',
+        [userEmail],
+        (err, results) => {
+            if (err) {
+                console.error('DB 오류:', err);
+                return res.status(500).json({ exists: false });
+            }
+
+            // DB에 해당 이메일이 있을시 true 아니면 false로 클라쪽으로 전달
+            const exists = results[0].idExists === 1;
+            res.json({ exists });
+        }
+    );
 });
 
 //[Post] 카카오 아이디 있는지 확인
@@ -225,4 +267,62 @@ app.post('/goLogin', (req, res) => {
     );
 });
 
+// [Post] 비밀번호 찾기
+app.post('/findPw', (req, res) => {
+    console.log('비밀번호 찾기');
+    let data = req.body;
+
+    let userId = data.userId;
+    let email = data.email;
+
+    connection.query(
+        'SELECT userEmail FROM userInfo WHERE userId = ?',
+        [userId],
+        (err, results) => {
+            if (err) {
+                console.error('DB 오류:', err);
+                return res.status(500).json({ success: false, message: 'DB 오류 발생' });
+            }
+
+            if (results.length === 0) {
+                return res.status(404).json({ success: false, message: '아이디가 존재하지 않습니다.' });
+            }
+
+            const storedEmail = results[0].userEmail;
+            if (storedEmail === email) {
+                // 임시 비밀번호 생성 (8자리 랜덤 문자열)
+                const temporaryPassword = crypto.randomBytes(4).toString('hex'); // 8자리 임시 비밀번호 생성
+
+                // 임시 비밀번호를 해싱하여 저장
+                const hashedPassword = crypto.createHash('sha256').update(temporaryPassword).digest('hex');
+
+                // 비밀번호를 업데이트
+                connection.query(
+                    'UPDATE userInfo SET userPw = ? WHERE userId = ?',
+                    [temporaryPassword, userId],
+                    (err, updateResult) => {
+                        if (err) {
+                            console.error('DB 오류:', err);
+                            return res.status(500).json({ success: false, message: '비밀번호 업데이트 오류 발생' });
+                        }
+
+                        // 임시 비밀번호를 이메일로 전송 (해시된 비밀번호가 아닌 임시 비밀번호 전송)
+                        sendTemporaryPassword(email, temporaryPassword) // 원래 임시 비밀번호를 전송
+                            .then(() => {
+                                console.log(`임시 비밀번호: ${temporaryPassword}`);
+                                return res.status(200).json({ success: true, message: '임시 비밀번호가 이메일로 전송되었습니다.' });
+                            })
+                            .catch(err => {
+                                console.error('이메일 전송 오류:', err);
+                                return res.status(500).json({ success: false, message: '이메일 전송 실패' });
+                            });
+                    }
+                );
+
+            } else {
+                return res.status(401).json({ success: false, message: '인증했던 이메일이 일치하지 않습니다.' });
+            }
+        }
+    );
+});
 
